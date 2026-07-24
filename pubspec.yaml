@@ -1,18 +1,19 @@
 name: dart_zstd
 description: >-
   Zstandard compression for Dart, all functions directly mapped from the C reference and bundled as a native asset.
-version: 0.1.1+zstd.1.5.7
+version: 0.1.2+zstd.1.5.7
 repository: https://github.com/dariyooo/dart_zstd
 
 environment:
   sdk: ^3.10.0
 
 dependencies:
-  code_assets: '>=1.2.1 <2.0.0'
+  code_assets: '>=1.0.0 <2.0.0'
   ffi: '>=2.1.0 <3.0.0'
-  hooks: '>=2.1.0 <3.0.0'
-  # 0.x native-assets packages break across minors, so the ceiling stays tight.
-  native_toolchain_c: '>=0.19.3 <0.20.0'
+  hooks: '>=1.0.1 <3.0.0'
+  # 0.x native-assets packages break across minors, so the ceiling stays tight;
+  # the floors are the oldest stack the hook verifiably compiles against.
+  native_toolchain_c: '>=0.17.5 <0.20.0'
 
 dev_dependencies:
   ffigen: ^19.0.0

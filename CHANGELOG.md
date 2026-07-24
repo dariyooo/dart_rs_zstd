@@ -1,3 +1,9 @@
+# Changelog
+
+## 0.1.2+zstd.1.5.7
+
+- less strict package constraints
+
 ## 0.1.1+zstd.1.5.7
 
 - less strict package constraints
