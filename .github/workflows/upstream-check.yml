@@ -1,0 +1,173 @@
+name: Upstream check
+
+# Every run appends to .github/upstream-check.log and pushes it. That doubles as
+# the repository activity GitHub wants to see, so the schedule is never
+# auto-disabled for being idle.
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Compare the pinned tag with the latest stable release
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pinned=$(git -C third_party/zstd describe --tags --exact-match)
+          # `releases/latest` skips drafts and pre-releases.
+          latest=$(gh api repos/facebook/zstd/releases/latest --jq .tag_name)
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          [ "$pinned" = "$latest" ] && outdated=false || outdated=true
+          echo "outdated=$outdated" >> "$GITHUB_OUTPUT"
+          echo "libzstd pinned at $pinned, latest stable is $latest"
+
+      - uses: dart-lang/setup-dart@v1
+        if: steps.compare.outputs.outdated == 'true'
+
+      - name: Install libclang for ffigen
+        if: steps.compare.outputs.outdated == 'true'
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
+      # Kept going on failure so a broken release still surfaces as a pull
+      # request instead of a silent red run.
+      - name: Bump the submodule, version and regenerate the bindings
+        id: bump
+        if: steps.compare.outputs.outdated == 'true'
+        continue-on-error: true
+        env:
+          LATEST: ${{ steps.compare.outputs.latest }}
+        run: |
+          set -euo pipefail
+          git -C third_party/zstd fetch --tags --force origin
+          git -C third_party/zstd checkout "$LATEST"
+
+          # Refresh the committed copy the package builds and publishes from;
+          # the submodule stays the upstream pin.
+          rm -rf third_party/libzstd/lib
+          cp -R third_party/zstd/lib third_party/libzstd/lib
+          cp third_party/zstd/LICENSE third_party/libzstd/LICENSE
+          cp third_party/zstd/COPYING third_party/libzstd/COPYING
+
+          dart pub get
+          dart run ffigen --config ffigen.yaml
+
+          # Bump our own patch and point the +zstd build metadata at the new tag.
+          current=$(sed -n 's/^version: //p' pubspec.yaml)
+          semver=${current%%+*}
+          IFS=. read -r major minor patch <<< "$semver"
+          upstream=${LATEST#v}
+          newver="$major.$minor.$((patch + 1))+zstd.$upstream"
+          echo "newver=$newver" >> "$GITHUB_OUTPUT"
+          sed -i "s/^version: .*/version: $newver/" pubspec.yaml
+
+          # Prepend to CHANGELOG via a temp file — a redirect would truncate it
+          # before the substitution reads it.
+          tmp=$(mktemp)
+          printf '## %s\n\n- Bump bundled libzstd to %s.\n\n' "$newver" "$upstream" > "$tmp"
+          cat CHANGELOG.md >> "$tmp"
+          mv "$tmp" CHANGELOG.md
+
+          dart analyze --fatal-infos
+          dart test
+          dart run example/dart_zstd_example.dart
+
+      - name: Open a pull request
+        id: pr
+        if: steps.compare.outputs.outdated == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.ref_name }}
+          PINNED: ${{ steps.compare.outputs.pinned }}
+          LATEST: ${{ steps.compare.outputs.latest }}
+          NEWVER: ${{ steps.bump.outputs.newver }}
+          VERIFIED: ${{ steps.bump.outcome }}
+        run: |
+          set -euo pipefail
+          branch="chore/libzstd-$LATEST"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "number=open" >> "$GITHUB_OUTPUT"
+            echo "$branch already exists, leaving it alone"
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git switch -c "$branch"
+          git add third_party/zstd third_party/libzstd lib/src/bindings.g.dart pubspec.yaml CHANGELOG.md
+          git commit -m "chore: bump libzstd to $LATEST"
+          git push origin "$branch"
+
+          if [ "$VERIFIED" = success ]; then
+            verdict='Analyzer, tests and the example all pass against it.'
+          else
+            verdict='**The build or tests failed against it** — see the workflow run.'
+          fi
+          cat > /tmp/pr-body.md <<BODY
+          Moves \`third_party/zstd\` from \`$PINNED\` to \`$LATEST\`, refreshes the
+          committed \`third_party/libzstd\` copy, regenerates
+          \`lib/src/bindings.g.dart\` from the new headers, and bumps the package
+          to \`$NEWVER\`.
+
+          $verdict
+
+          Opened by the weekly upstream check.
+          BODY
+
+          gh pr create --base "$BASE" --head "$branch" \
+            --title "chore: bump libzstd to $LATEST" \
+            --body-file /tmp/pr-body.md \
+            > /tmp/pr-url
+          echo "number=$(grep -oE '[0-9]+$' /tmp/pr-url)" >> "$GITHUB_OUTPUT"
+
+      - name: Append this run to the log
+        if: always()
+        env:
+          BASE: ${{ github.ref_name }}
+          PINNED: ${{ steps.compare.outputs.pinned }}
+          LATEST: ${{ steps.compare.outputs.latest }}
+          OUTDATED: ${{ steps.compare.outputs.outdated }}
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+          # Drop anything the earlier steps left behind before touching the log.
+          git reset --hard HEAD
+          git submodule update --init --recursive
+          git switch "$BASE"
+
+          case "$OUTDATED" in
+            true) outcome="pull request #${PR:-failed}" ;;
+            false) outcome='up to date' ;;
+            *) outcome='check failed' ;;
+          esac
+          printf '%s  pinned=%-10s latest=%-10s %s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            "${PINNED:-unknown}" "${LATEST:-unknown}" "$outcome" \
+            >> .github/upstream-check.log
+
+          git add .github/upstream-check.log
+          git commit -m 'chore: record upstream check'
+          git pull --rebase origin "$BASE"
+          git push origin "$BASE"

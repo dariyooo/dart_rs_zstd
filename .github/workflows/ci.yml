@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    # The weekly upstream check pushes only this file.
+    paths-ignore: ['.github/upstream-check.log']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dart-lang/setup-dart@v1
+
+      - run: dart pub get
+
+      - name: Analyze
+        run: dart analyze --fatal-infos
+
+      - name: Check formatting
+        if: matrix.os == 'ubuntu-latest'
+        run: dart format --output=none --set-exit-if-changed lib example test hook
+
+      # Builds libzstd through hook/build.dart on the way in.
+      - name: Test
+        run: dart test
+
+      - name: Run the example
+        run: dart run example/dart_zstd_example.dart
+
+  bindings-up-to-date:
+    name: bindings match the vendored headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dart-lang/setup-dart@v1
+
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
+      - run: dart pub get
+
+      - name: Regenerate
+        run: dart run ffigen --config ffigen.yaml
+
+      - name: Fail if the checked-in bindings differ
+        run: git diff --exit-code lib/src/bindings.g.dart

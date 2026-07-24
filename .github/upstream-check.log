@@ -1,0 +1,2 @@
+# Append-only record of the weekly upstream check. One line per run.
+2026-07-23T00:00:00Z  pinned=v1.5.7    latest=v1.5.7    up to date
